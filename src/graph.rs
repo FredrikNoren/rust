@@ -308,6 +308,42 @@ impl Graph {
                .map(|x| Output::from_c(self, x))
                .collect())
     }
+
+    ///
+    pub fn add_gradients(&mut self,
+                         ys: &[Output],
+                         xs: &[Output],
+                         dxs: Option<&[Output]>)
+                         -> Result<Vec<Output>> {
+        let mut c_ys: Vec<tf::TF_Output> = ys.iter().map(|x| x.to_c()).collect();
+        let mut c_xs: Vec<tf::TF_Output> = xs.iter().map(|x| x.to_c()).collect();
+        let mut c_dxs: Option<Vec<tf::TF_Output>> = if let Some(dxs) = dxs {
+            Some(dxs.iter().map(|x| x.to_c()).collect())
+        } else {
+            None
+        };
+        let mut c_dys = Vec::with_capacity(xs.len());
+        let mut status = Status::new();
+        unsafe {
+            tf::TF_AddGradients(self.gimpl.inner,
+                                c_ys.as_mut_ptr(),
+                                c_ys.len() as c_int,
+                                c_xs.as_mut_ptr(),
+                                c_xs.len() as c_int,
+                                match c_dxs {
+                                    Some(mut c_dxs) => c_dxs.as_mut_ptr(),
+                                    None => ptr::null_mut()
+                                },
+                                status.inner(),
+                                c_dys.as_mut_ptr());
+            c_dys.set_len(xs.len() as usize);
+        }
+        status.into_result()?;
+        Ok(c_dys
+               .iter()
+               .map(|x| Output::from_c(self, x))
+               .collect())
+    }
 }
 
 impl GraphTrait for Graph {
@@ -970,9 +1006,9 @@ impl<'a> OperationDescription<'a> {
         &mut self,
         attr_name: &str,
         value: I
-        ) -> Result<()> 
-        where I: IntoIterator<Item = Tensor<T>>, 
-            T: TensorType 
+        ) -> Result<()>
+        where I: IntoIterator<Item = Tensor<T>>,
+            T: TensorType
     {
         let c_attr_name = CString::new(attr_name)?;
         let mut status = Status::new();
@@ -1044,14 +1080,15 @@ mod tests {
         assert!(status.is_ok());
     }
 
+    fn constant<T: TensorType>(graph: &mut Graph, name: &str, value: Tensor<T>) -> Operation {
+        let mut c = graph.new_operation("Const", name).unwrap();
+        c.set_attr_tensor("value", value).unwrap();
+        c.set_attr_type("dtype", T::data_type()).unwrap();
+        c.finish().unwrap()
+    }
+
     #[test]
     fn test_get_tensor_shape() {
-        fn constant<T: TensorType>(graph: &mut Graph, name: &str, value: Tensor<T>) -> Operation {
-            let mut c = graph.new_operation("Const", name).unwrap();
-            c.set_attr_tensor("value", value).unwrap();
-            c.set_attr_type("dtype", T::data_type()).unwrap();
-            c.finish().unwrap()
-        }
 
         let mut graph = Graph::new();
         let x_init = Tensor::<i32>::new(&[3, 3]);
@@ -1073,4 +1110,28 @@ mod tests {
             .unwrap();
         assert_eq!(shape, Shape(Some(vec![Some(3_i64), Some(3_i64)])));
     }
+
+    #[test]
+    fn test_add_gradients() {
+        let mut g = Graph::new();
+        let x_init = Tensor::<f32>::new(&[]);
+        let x = constant(&mut g, "x", x_init);
+        let y = {
+            let mut op = g.new_operation("Tanh", "y").unwrap();
+            op.add_input(Output { operation: x.clone(), index: 0 });
+            op.finish().unwrap()
+        };
+        println!("____GRPH1___");
+        for op in g.operation_iter() {
+            println!("op {:?}", (op.name(), op.op_type(), op.num_outputs(), op.num_inputs()));
+        }
+        let r = g.add_gradients(&[Output { operation: y, index: 0 }], &[Output { operation: x, index: 0 }], None).unwrap();
+        println!("____GRPH___");
+        for op in g.operation_iter() {
+            println!("op {:?}", (op.name(), op.op_type(), op.num_outputs(), op.num_inputs()));
+        }
+        panic!("{:?}", r);
+        assert_eq!(r.len(), 1);
+    }
+
 }
